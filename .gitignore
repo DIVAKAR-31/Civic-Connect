@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Production build
+dist/
+dist-ssr/
+
+# Local SQLite database & uploaded files
+data/
+uploads/
+
+# Environment variables & secrets
+.env
+.env.local
+.env.*.local
+
+# Logs & OS files
+logs/
+*.log
+npm-debug.log*
+.DS_Store
+.vscode/*
+!.vscode/extensions.json

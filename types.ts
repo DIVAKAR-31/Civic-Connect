@@ -1,4 +1,3 @@
-
 export enum IssueCategory {
   POTHOLE = 'Pothole',
   ROAD_DAMAGE = 'Road Damage',
@@ -19,7 +18,7 @@ export enum IssueCategory {
   SEWAGE_OVERFLOW = 'Sewage Overflow',
   AIR_QUALITY = 'Air Pollution',
   PUBLIC_TRANSPORT = 'Public Transport',
-  VANDALISM = 'Vandalsim',
+  VANDALISM = 'Vandalism',
   ABANDONED_VEHICLE = 'Abandoned Vehicle',
   MOSQUITO_BREEDING = 'Mosquito Breeding',
   ILLEGAL_ADVERTISING = 'Illegal Advertising',
@@ -58,8 +57,8 @@ export enum IssuePriority {
 }
 
 export enum EscalationLevel {
-  VILLAGE_PRESIDENT = 'Village President',
-  TALUK_OFFICE = 'Taluk Office',
+  VILLAGE_PRESIDENT = 'Village / City President',
+  TALUK_OFFICE = 'Taluk Officer',
   DISTRICT_COLLECTOR = 'District Collector'
 }
 
@@ -73,60 +72,73 @@ export interface Location {
   district?: string;
 }
 
-export interface ActionSuggestion {
-  department: string;
-  manpower: string;
-  steps: string[];
-  estimatedHours: number;
-}
-
 export interface AdminAIAnalysis {
+  mode?: 'live-ai' | 'demo-mode';
+  modeLabel?: string;
   riskScore: number;
   fraudDetectionReasoning: string;
   predictedResolutionHours: number;
   priorityJustification: string;
-  resourceComplexity: 'Simple' | 'Moderate' | 'Complex';
-  slaStatus: 'on-track' | 'at-risk' | 'violation';
-  trustImpact?: number;
+  resourceComplexity: 'Simple' | 'Moderate' | 'Complex' | string;
+  slaStatus: 'on-track' | 'at-risk' | 'violation' | string;
 }
 
-export interface PolicySimulation {
-  expectedImprovement: string;
-  costBenefitRatio: string;
-  satisfactionDelta: number;
-  riskAssessment: string;
-}
-
-export interface TalukBudgetAdvisory {
-  suggestedBudget: number;
-  manpowerRequired: string;
-  breakdown: string[];
-  efficiencyJustification: string;
-  complexityFactor: string;
+export interface AIAnalyzeResponse {
+  mode: 'live-ai' | 'demo-mode';
+  modeLabel: string;
+  category: string;
+  priority: string;
+  department: string;
+  summary: string;
+  reasoning: string;
+  duplicateCheck: {
+    isDuplicate: boolean;
+    parentId?: string | null;
+    matches?: Array<{
+      id: string;
+      title: string;
+      status: string;
+      similarity: number;
+      area: string;
+    }>;
+    reasoning: string;
+  };
 }
 
 export interface ResolveChainEvent {
   timestamp: string;
   status: IssueStatus | string;
   action: string;
+  remarks?: string;
   actor: string;
-  tier?: EscalationLevel;
+  actorRole?: string;
+  tier?: EscalationLevel | string;
 }
 
 export interface Grievance {
   id: string;
+  dbId?: number;
+  trackingId?: string;
   dnaSignature: string;
+  citizenName?: string;
+  citizenEmail?: string;
   title: string;
-  category: IssueCategory;
+  category: IssueCategory | string;
   description: string;
   image?: string;
   location: Location;
-  status: IssueStatus;
-  priority: IssuePriority;
-  currentTier: EscalationLevel;
+  status: IssueStatus | string;
+  priority: IssuePriority | string;
+  currentTier: EscalationLevel | string;
+  assignedDepartment?: string;
+  assignedAuthority?: string;
   createdAt: string;
   updatedAt: string;
   aiCategorized: boolean;
+  aiMode?: 'live-ai' | 'demo-mode' | string;
+  aiSummary?: string;
+  aiSuggestedDepartment?: string;
+  aiReasoning?: string;
   rating?: number;
   feedback?: string;
   upvotes: number;
@@ -134,14 +146,12 @@ export interface Grievance {
   isEmergency?: boolean;
   slaDeadline?: string;
   isAnonymous?: boolean;
+  isSample?: boolean;
   parentCaseId?: string;
-  aiSuggestions?: ActionSuggestion;
-  adminAIAnalysis?: AdminAIAnalysis;
-  talukBudgetAdvisory?: TalukBudgetAdvisory;
   resolveChain: ResolveChainEvent[];
 }
 
-export type UserRole = 'citizen' | 'admin';
+export type UserRole = 'citizen' | 'admin' | 'authority';
 
 export interface UserImpactLedger {
   reportsVerified: number;
@@ -150,10 +160,12 @@ export interface UserImpactLedger {
 }
 
 export interface User {
+  id?: number;
+  name?: string;
   email: string;
-  password?: string;
   role: UserRole;
-  adminLevel?: EscalationLevel;
+  adminLevel?: EscalationLevel | string;
+  authorityTier?: EscalationLevel | string;
   district?: string;
   taluk?: string;
   village?: string;
@@ -161,4 +173,36 @@ export interface User {
   trustScore: number;
   badges: string[];
   impactLedger?: UserImpactLedger;
+}
+
+export interface NotificationItem {
+  id: number;
+  trackingId?: string;
+  title: string;
+  message: string;
+  type: 'info' | 'success' | 'warning' | 'alert';
+  isRead: boolean;
+  createdAt: string;
+}
+
+export interface AnalyticsData {
+  scope: 'all' | 'live' | 'sample';
+  counts: { live: number; sample: number };
+  summary: {
+    total: number;
+    pending: number;
+    inProgress: number;
+    escalated: number;
+    resolved: number;
+    highPriority: number;
+  };
+  byCategory: Array<{ category: string; count: number }>;
+  monthlyStats: Array<{ label: string; submitted: number; resolved: number }>;
+  authorityPerformance: Array<{
+    tier: string;
+    total: number;
+    resolved: number;
+    pending: number;
+    resolutionRate: number;
+  }>;
 }
