@@ -3,6 +3,21 @@ import { AnalyticsData, Grievance, NotificationItem, User } from '../types';
 const TOKEN_KEY = 'civicconnect_token';
 const USER_KEY = 'civicconnect_user';
 
+export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+
+export function buildApiUrl(path: string): string {
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+  return API_BASE_URL ? `${API_BASE_URL}${normalized}` : normalized;
+}
+
+export function resolveMediaUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  if (url.startsWith('/uploads/') && API_BASE_URL) {
+    return `${API_BASE_URL}${url}`;
+  }
+  return url;
+}
+
 export function getAuthToken(): string | null {
   try {
     return localStorage.getItem(TOKEN_KEY);
@@ -37,7 +52,7 @@ export function clearSession() {
   } catch {}
 }
 
-async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
+async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getAuthToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -47,16 +62,31 @@ async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
     headers.Authorization = `Bearer ${token}`;
   }
 
-  const res = await fetch(url, { ...options, headers });
-  const data = await res.json().catch(() => ({}));
+  const res = await fetch(buildApiUrl(path), { ...options, headers });
+  const text = await res.text();
+  let data: any = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = {};
+  }
+
   if (!res.ok) {
-    throw new Error(data.error || `Request failed (${res.status})`);
+    const msg =
+      data.error ||
+      (res.status === 404
+        ? `API endpoint not found (${path}). Verify backend /api routing or VITE_API_BASE_URL.`
+        : `Request failed (${res.status})`);
+    throw new Error(msg);
   }
   return data as T;
 }
 
 export const apiClient = {
-  health: () => apiFetch<{ ok: boolean; aiMode: 'live-ai' | 'demo-mode' }>('/api/health'),
+  health: () =>
+    apiFetch<{ ok: boolean; dbConnected?: boolean; dbDriver?: string; aiMode: 'live-ai' | 'demo-mode' }>(
+      '/api/health'
+    ),
 
   register: (payload: { name: string; email: string; password: string; district?: string; taluk?: string; village?: string }) =>
     apiFetch<{ user: User; token: string }>('/api/auth/register', {

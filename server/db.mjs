@@ -1,20 +1,224 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import pg from 'pg';
 import { hashPassword } from './auth.mjs';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+const { Pool } = pg;
+
+export class DbNotConfiguredError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'DbNotConfiguredError';
+    this.statusCode = 503;
+  }
 }
 
-const DB_PATH = path.join(DATA_DIR, 'civicconnect.db');
-export const db = new DatabaseSync(DB_PATH);
+const POSTGRES_URL =
+  process.env.DATABASE_URL ||
+  process.env.POSTGRES_URL ||
+  process.env.POSTGRES_PRISMA_URL ||
+  '';
 
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA foreign_keys = ON;');
+const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+export const DB_DRIVER = POSTGRES_URL ? 'postgres' : IS_SERVERLESS ? 'unconfigured' : 'sqlite';
 
-export function initDatabase() {
+let pgPool = null;
+let sqliteDb = null;
+let initPromise = null;
+
+function convertPlaceholders(sql) {
+  let idx = 0;
+  return sql.replace(/\?/g, () => `$${++idx}`);
+}
+
+async function getSqlite() {
+  if (sqliteDb) return sqliteDb;
+  const { DatabaseSync } = await import('node:sqlite');
+  const DATA_DIR = path.resolve(process.cwd(), 'data');
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  const dbPath = path.join(DATA_DIR, 'civicconnect.db');
+  sqliteDb = new DatabaseSync(dbPath);
+  sqliteDb.exec('PRAGMA journal_mode = WAL;');
+  sqliteDb.exec('PRAGMA foreign_keys = ON;');
+  return sqliteDb;
+}
+
+function getPgPool() {
+  if (pgPool) return pgPool;
+  const needsSsl =
+    !/localhost|127\.0\.0\.1/i.test(POSTGRES_URL) && !/sslmode=disable/i.test(POSTGRES_URL);
+  pgPool = new Pool({
+    connectionString: POSTGRES_URL,
+    ssl: needsSsl ? { rejectUnauthorized: false } : false,
+    max: 10,
+    idleTimeoutMillis: 20000,
+    connectionTimeoutMillis: 10000,
+  });
+  return pgPool;
+}
+
+function assertDbConfigured() {
+  if (DB_DRIVER === 'unconfigured') {
+    throw new DbNotConfiguredError(
+      'Persistent database not configured for serverless production. Add DATABASE_URL or POSTGRES_URL (e.g., Neon / Supabase / Vercel Postgres) in Vercel Environment Variables and redeploy.'
+    );
+  }
+}
+
+export async function queryAll(sql, params = []) {
+  assertDbConfigured();
+  if (DB_DRIVER === 'postgres') {
+    const pool = getPgPool();
+    const res = await pool.query(convertPlaceholders(sql), params);
+    return res.rows;
+  }
+  const db = await getSqlite();
+  return db.prepare(sql).all(...params);
+}
+
+export async function queryGet(sql, params = []) {
+  const rows = await queryAll(sql, params);
+  return rows[0] || null;
+}
+
+export async function execute(sql, params = [], { returnId = false } = {}) {
+  assertDbConfigured();
+  if (DB_DRIVER === 'postgres') {
+    const pool = getPgPool();
+    let pgSql = convertPlaceholders(sql);
+    if (returnId && !/\bRETURNING\b/i.test(pgSql)) {
+      pgSql = `${pgSql.trim().replace(/;$/, '')} RETURNING id`;
+    }
+    const res = await pool.query(pgSql, params);
+    return {
+      lastInsertRowid: res.rows?.[0]?.id ?? null,
+      changes: res.rowCount ?? 0,
+    };
+  }
+  const db = await getSqlite();
+  const info = db.prepare(sql).run(...params);
+  return {
+    lastInsertRowid: Number(info.lastInsertRowid || 0),
+    changes: info.changes || 0,
+  };
+}
+
+export async function checkDbHealth() {
+  if (DB_DRIVER === 'unconfigured') {
+    return { connected: false, driver: 'unconfigured', error: 'DATABASE_URL / POSTGRES_URL missing in production.' };
+  }
+  try {
+    await queryGet('SELECT 1 AS ok');
+    return { connected: true, driver: DB_DRIVER };
+  } catch (err) {
+    return { connected: false, driver: DB_DRIVER, error: err.message };
+  }
+}
+
+async function createTables() {
+  if (DB_DRIVER === 'postgres') {
+    const pool = getPgPool();
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('citizen', 'admin', 'authority')),
+        authority_tier TEXT,
+        district TEXT,
+        taluk TEXT,
+        village TEXT,
+        points INTEGER DEFAULT 100,
+        trust_score INTEGER DEFAULT 80,
+        badges TEXT DEFAULT '["Newcomer"]',
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS complaints (
+        id SERIAL PRIMARY KEY,
+        tracking_id TEXT NOT NULL UNIQUE,
+        dna_signature TEXT NOT NULL UNIQUE,
+        citizen_id INTEGER,
+        citizen_name TEXT,
+        citizen_email TEXT,
+        is_anonymous INTEGER DEFAULT 0,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL,
+        description TEXT NOT NULL,
+        image_url TEXT,
+        latitude DOUBLE PRECISION DEFAULT 13.0827,
+        longitude DOUBLE PRECISION DEFAULT 80.2707,
+        address TEXT,
+        area TEXT,
+        village TEXT,
+        taluk TEXT,
+        district TEXT,
+        status TEXT NOT NULL DEFAULT 'Submitted',
+        priority TEXT NOT NULL DEFAULT 'Medium',
+        current_tier TEXT NOT NULL DEFAULT 'Village / City President',
+        assigned_department TEXT,
+        assigned_authority TEXT,
+        ai_categorized INTEGER DEFAULT 0,
+        ai_mode TEXT DEFAULT 'demo-mode',
+        ai_summary TEXT,
+        ai_suggested_department TEXT,
+        ai_reasoning TEXT,
+        is_duplicate_of TEXT,
+        sla_deadline TEXT NOT NULL,
+        is_emergency INTEGER DEFAULT 0,
+        upvotes INTEGER DEFAULT 0,
+        rating INTEGER,
+        feedback TEXT,
+        is_sample INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS complaint_events (
+        id SERIAL PRIMARY KEY,
+        complaint_id INTEGER NOT NULL REFERENCES complaints(id) ON DELETE CASCADE,
+        timestamp TEXT NOT NULL,
+        status TEXT NOT NULL,
+        action TEXT NOT NULL,
+        remarks TEXT,
+        actor TEXT NOT NULL,
+        actor_role TEXT,
+        tier TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS notifications (
+        id SERIAL PRIMARY KEY,
+        user_email TEXT NOT NULL,
+        tracking_id TEXT,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        type TEXT DEFAULT 'info',
+        is_read INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS complaint_upvotes (
+        complaint_id INTEGER NOT NULL REFERENCES complaints(id) ON DELETE CASCADE,
+        user_email TEXT NOT NULL,
+        PRIMARY KEY (complaint_id, user_email)
+      );
+
+      CREATE TABLE IF NOT EXISTS contact_messages (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    return;
+  }
+
+  const db = await getSqlite();
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,38 +316,29 @@ export function initDatabase() {
       created_at TEXT NOT NULL
     );
   `);
-
-  seedInitialData();
 }
 
-function seedInitialData() {
-  const userCount = db.prepare('SELECT COUNT(*) as cnt FROM users').get().cnt;
+async function seedInitialData() {
+  if (process.env.SEED_DEMO_DATA === 'false') return;
+
+  const userRow = await queryGet('SELECT COUNT(*) as cnt FROM users');
+  const userCount = Number(userRow?.cnt || 0);
   if (userCount === 0) {
     const now = new Date().toISOString();
-    const insertUser = db.prepare(`
-      INSERT INTO users (name, email, password_hash, role, authority_tier, district, taluk, village, points, trust_score, badges, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
     const seedUsers = [
-      // Citizens
       ['Citizen Demo', 'user@civic.gov', hashPassword('password'), 'citizen', null, 'Chennai', 'Mambalam', 'Royapettah', 320, 88, '["Verified Citizen","Active Reporter"]', now],
       ['Rahul S.', 'rahul.citizen@civic.tn', hashPassword('Citizen@2026'), 'citizen', null, 'Chennai', 'Mambalam', 'Royapettah', 1450, 95, '["Diamond Citizen","Community Watch"]', now],
       ['Priya M.', 'priya.citizen@civic.tn', hashPassword('Citizen@2026'), 'citizen', null, 'Madurai', 'Madurai East', 'Keelavalavu', 1200, 92, '["Platinum Hero"]', now],
       ['Arjun K.', 'arjun.citizen@civic.tn', hashPassword('Citizen@2026'), 'citizen', null, 'Coimbatore', 'Pollachi', 'Anaikatti', 890, 86, '["Civic Sentinel"]', now],
-      // System Admin
       ['Municipal System Admin', 'admin@civic.gov', hashPassword('admin123'), 'admin', 'System Administrator', null, null, null, 0, 100, '["State Oversight Admin"]', now],
-      // Government Authorities (Tier 1: Village / City President)
       ['Village / City President (Demo)', 'president@civicconnect.gov.in', hashPassword('President@123'), 'authority', 'Village / City President', 'Chennai', 'Mambalam', 'Royapettah', 0, 100, '["Tier 1 Authority"]', now],
       ['Royapettah City President', 'president.royapettah@tn.gov', hashPassword('PresRoy@2026'), 'authority', 'Village / City President', 'Chennai', 'Mambalam', 'Royapettah', 0, 100, '["Tier 1 Authority"]', now],
       ['Keelavalavu Village President', 'president.keelavalavu@tn.gov', hashPassword('PresKvl@2026'), 'authority', 'Village / City President', 'Madurai', 'Madurai East', 'Keelavalavu', 0, 100, '["Tier 1 Authority"]', now],
       ['Anaikatti Village President', 'president.anaikatti@tn.gov', hashPassword('PresAna@2026'), 'authority', 'Village / City President', 'Coimbatore', 'Pollachi', 'Anaikatti', 0, 100, '["Tier 1 Authority"]', now],
-      // Government Authorities (Tier 2: Taluk Officer)
       ['Taluk Officer (Demo)', 'taluk@civicconnect.gov.in', hashPassword('Taluk@123'), 'authority', 'Taluk Officer', 'Madurai', 'Madurai East', null, 0, 100, '["Tier 2 Authority"]', now],
       ['Madurai East Taluk Officer', 'taluk.madurai@tn.gov', hashPassword('TalukMad@2026'), 'authority', 'Taluk Officer', 'Madurai', 'Madurai East', null, 0, 100, '["Tier 2 Authority"]', now],
       ['Pollachi Taluk Officer', 'taluk.pollachi@tn.gov', hashPassword('TalukPol@2026'), 'authority', 'Taluk Officer', 'Coimbatore', 'Pollachi', null, 0, 100, '["Tier 2 Authority"]', now],
       ['Srirangam Taluk Officer', 'taluk.srirangam@tn.gov', hashPassword('TalukSri@2026'), 'authority', 'Taluk Officer', 'Tiruchirappalli', 'Srirangam', null, 0, 100, '["Tier 2 Authority"]', now],
-      // Government Authorities (Tier 3: District Collector)
       ['District Collector (Demo)', 'collector@civicconnect.gov.in', hashPassword('Collector@123'), 'authority', 'District Collector', 'Coimbatore', null, null, 0, 100, '["Tier 3 Authority"]', now],
       ['Chennai District Collector', 'collector.chennai@tn.gov', hashPassword('Chn@2026'), 'authority', 'District Collector', 'Chennai', null, null, 0, 100, '["Tier 3 Authority"]', now],
       ['Madurai District Collector', 'collector.madurai@tn.gov', hashPassword('Mad@2026'), 'authority', 'District Collector', 'Madurai', null, null, 0, 100, '["Tier 3 Authority"]', now],
@@ -151,30 +346,20 @@ function seedInitialData() {
     ];
 
     for (const u of seedUsers) {
-      insertUser.run(...u);
+      await execute(
+        `INSERT INTO users (name, email, password_hash, role, authority_tier, district, taluk, village, points, trust_score, badges, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (email) DO NOTHING`,
+        u
+      );
     }
   }
 
-  const complaintCount = db.prepare('SELECT COUNT(*) as cnt FROM complaints').get().cnt;
+  const cRow = await queryGet('SELECT COUNT(*) as cnt FROM complaints');
+  const complaintCount = Number(cRow?.cnt || 0);
   if (complaintCount === 0) {
     const hoursAgo = (h) => new Date(Date.now() - h * 3600 * 1000).toISOString();
     const hoursFromNow = (h) => new Date(Date.now() + h * 3600 * 1000).toISOString();
     const daysAgoDate = (d) => new Date(Date.now() - d * 86400 * 1000).toISOString();
-
-    const insertComplaint = db.prepare(`
-      INSERT INTO complaints (
-        tracking_id, dna_signature, citizen_id, citizen_name, citizen_email, is_anonymous,
-        title, category, description, image_url, latitude, longitude, address, area, village, taluk, district,
-        status, priority, current_tier, assigned_department, assigned_authority,
-        ai_categorized, ai_mode, ai_summary, ai_suggested_department, ai_reasoning,
-        sla_deadline, is_emergency, upvotes, rating, feedback, is_sample, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const insertEvent = db.prepare(`
-      INSERT INTO complaint_events (complaint_id, timestamp, status, action, remarks, actor, actor_role, tier)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
 
     const sampleCases = [
       {
@@ -470,85 +655,117 @@ function seedInitialData() {
     ];
 
     for (const c of sampleCases) {
-      const info = insertComplaint.run(
-        c.tracking_id,
-        c.dna,
-        null,
-        c.citizen_name,
-        c.citizen_email,
-        0,
-        c.title,
-        c.category,
-        c.description,
-        null,
-        c.lat,
-        c.lng,
-        c.address,
-        c.area,
-        c.village,
-        c.taluk,
-        c.district,
-        c.status,
-        c.priority,
-        c.tier,
-        c.dept,
-        c.authority,
-        1,
-        'demo-mode',
-        c.summary,
-        c.dept,
-        c.reasoning,
-        c.sla,
-        c.priority === 'Critical' ? 1 : 0,
-        c.upvotes,
-        c.rating || null,
-        c.feedback || null,
-        1,
-        c.created,
-        c.updated
+      const info = await execute(
+        `INSERT INTO complaints (
+          tracking_id, dna_signature, citizen_id, citizen_name, citizen_email, is_anonymous,
+          title, category, description, image_url, latitude, longitude, address, area, village, taluk, district,
+          status, priority, current_tier, assigned_department, assigned_authority,
+          ai_categorized, ai_mode, ai_summary, ai_suggested_department, ai_reasoning,
+          sla_deadline, is_emergency, upvotes, rating, feedback, is_sample, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          c.tracking_id,
+          c.dna,
+          null,
+          c.citizen_name,
+          c.citizen_email,
+          0,
+          c.title,
+          c.category,
+          c.description,
+          null,
+          c.lat,
+          c.lng,
+          c.address,
+          c.area,
+          c.village,
+          c.taluk,
+          c.district,
+          c.status,
+          c.priority,
+          c.tier,
+          c.dept,
+          c.authority,
+          1,
+          'demo-mode',
+          c.summary,
+          c.dept,
+          c.reasoning,
+          c.sla,
+          c.priority === 'Critical' ? 1 : 0,
+          c.upvotes,
+          c.rating || null,
+          c.feedback || null,
+          1,
+          c.created,
+          c.updated,
+        ],
+        { returnId: true }
       );
       const complaintId = info.lastInsertRowid;
       for (const ev of c.events) {
-        insertEvent.run(complaintId, ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6]);
+        await execute(
+          `INSERT INTO complaint_events (complaint_id, timestamp, status, action, remarks, actor, actor_role, tier)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [complaintId, ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6]]
+        );
       }
     }
 
-    const insertNotif = db.prepare(`
-      INSERT INTO notifications (user_email, tracking_id, title, message, type, is_read, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    insertNotif.run(
-      'user@civic.gov',
-      'CC-1001',
-      'Dewatering Crew Dispatched',
-      'Royapettah City President updated CC-1001 to In Progress: Field engineers clearing clogged catch basin.',
-      'info',
-      0,
-      hoursAgo(3)
+    await execute(
+      `INSERT INTO notifications (user_email, tracking_id, title, message, type, is_read, created_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?)`,
+      [
+        'user@civic.gov',
+        'CC-1001',
+        'Dewatering Crew Dispatched',
+        'Royapettah City President updated CC-1001 to In Progress: Field engineers clearing clogged catch basin.',
+        'info',
+        hoursAgo(3),
+      ]
     );
-    insertNotif.run(
-      'user@civic.gov',
-      'CC-1007',
-      'Complaint Resolved — Feedback Received',
-      'CC-1007 (Broken drainage cover repaired) has been marked Resolved. Thank you for rating 5/5!',
-      'success',
-      1,
-      daysAgoDate(16)
+    await execute(
+      `INSERT INTO notifications (user_email, tracking_id, title, message, type, is_read, created_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?)`,
+      [
+        'user@civic.gov',
+        'CC-1007',
+        'Complaint Resolved — Feedback Received',
+        'CC-1007 (Broken drainage cover repaired) has been marked Resolved. Thank you for rating 5/5!',
+        'success',
+        daysAgoDate(16),
+      ]
     );
   }
 }
 
-export function formatComplaintRow(row, userEmail = null) {
+export async function initDatabase() {
+  assertDbConfigured();
+  if (!initPromise) {
+    initPromise = (async () => {
+      await createTables();
+      await seedInitialData();
+    })().catch((err) => {
+      initPromise = null;
+      throw err;
+    });
+  }
+  return initPromise;
+}
+
+export async function formatComplaintRow(row, userEmail = null) {
   if (!row) return null;
-  const events = db
-    .prepare('SELECT timestamp, status, action, remarks, actor, actor_role as actorRole, tier FROM complaint_events WHERE complaint_id = ? ORDER BY id ASC')
-    .all(row.id);
+  const events = await queryAll(
+    'SELECT timestamp, status, action, remarks, actor, actor_role as "actorRole", tier FROM complaint_events WHERE complaint_id = ? ORDER BY id ASC',
+    [row.id]
+  );
 
   let votedByMe = false;
   if (userEmail) {
-    const vote = db
-      .prepare('SELECT 1 FROM complaint_upvotes WHERE complaint_id = ? AND user_email = ?')
-      .get(row.id, userEmail);
+    const vote = await queryGet(
+      'SELECT 1 as voted FROM complaint_upvotes WHERE complaint_id = ? AND user_email = ?',
+      [row.id, userEmail]
+    );
     votedByMe = Boolean(vote);
   }
 
@@ -565,8 +782,8 @@ export function formatComplaintRow(row, userEmail = null) {
     description: row.description,
     image: row.image_url || undefined,
     location: {
-      latitude: row.latitude,
-      longitude: row.longitude,
+      latitude: Number(row.latitude),
+      longitude: Number(row.longitude),
       address: row.address || '',
       area: row.area || '',
       village: row.village || '',
@@ -586,9 +803,9 @@ export function formatComplaintRow(row, userEmail = null) {
     parentCaseId: row.is_duplicate_of || undefined,
     slaDeadline: row.sla_deadline,
     isEmergency: Boolean(row.is_emergency),
-    upvotes: row.upvotes || 0,
+    upvotes: Number(row.upvotes || 0),
     votedByMe,
-    rating: row.rating || undefined,
+    rating: row.rating ? Number(row.rating) : undefined,
     feedback: row.feedback || undefined,
     isSample: Boolean(row.is_sample),
     createdAt: row.created_at,

@@ -1,17 +1,23 @@
 import { AIAnalyzeResponse, AdminAIAnalysis, Location } from '../types';
-import { getAuthToken } from './apiClient';
+import { buildApiUrl, getAuthToken } from './apiClient';
 
-async function postJson<T>(url: string, body: any): Promise<T> {
+async function postJson<T>(path: string, body: any): Promise<T> {
   const token = getAuthToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(url, {
+  const res = await fetch(buildApiUrl(path), {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'AI service request failed');
+  const text = await res.text();
+  let data: any = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = {};
+  }
+  if (!res.ok) throw new Error(data.error || `AI service request failed (${res.status})`);
   return data as T;
 }
 
