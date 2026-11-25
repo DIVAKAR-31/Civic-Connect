@@ -212,6 +212,8 @@ const TrackPage: React.FC<TrackPageProps> = ({ grievances, onUpvote }) => {
               <LiveTrackingMap
                 mode="viewer"
                 grievances={filteredGrievances}
+                selectedGrievanceId={activeSelected?.id}
+                focusLocation={activeSelected?.location}
                 onGrievanceClick={(g) => setSelectedIssue(g)}
                 className="h-[580px]"
               />

@@ -10,12 +10,14 @@ import {
   MapPin,
   Loader2,
   ShieldAlert,
+  Map as MapIcon,
 } from 'lucide-react';
 import { AnalyticsData, EscalationLevel, Grievance, IssueStatus, User } from '../types';
 import { apiClient } from '../services/apiClient';
 import PortalLayout, { SidebarNavItem } from '../components/PortalLayout';
 import ComplaintTimeline from '../components/ComplaintTimeline';
 import AnalyticsCharts from '../components/AnalyticsCharts';
+import LiveTrackingMap from '../components/LiveTrackingMap';
 
 interface AuthorityPortalPageProps {
   user: User;
@@ -36,7 +38,7 @@ const AuthorityPortalPage: React.FC<AuthorityPortalPageProps> = ({
   onRefresh,
   onLogout,
 }) => {
-  const [activeTab, setActiveTab] = useState<'assigned' | 'sla' | 'analytics'>('assigned');
+  const [activeTab, setActiveTab] = useState<'assigned' | 'sla' | 'map' | 'analytics'>('assigned');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [remarks, setRemarks] = useState('');
   const [acting, setActing] = useState(false);
@@ -117,6 +119,7 @@ const AuthorityPortalPage: React.FC<AuthorityPortalPageProps> = ({
   const navItems: SidebarNavItem[] = [
     { id: 'assigned', label: 'Assigned Queue', icon: <ClipboardCheck size={17} />, badge: tierComplaints.length },
     { id: 'sla', label: 'SLA Deadlines', icon: <Clock size={17} />, badge: overdueList.length },
+    { id: 'map', label: 'Jurisdiction Map', icon: <MapIcon size={17} />, badge: tierComplaints.length },
     { id: 'analytics', label: 'Performance Stats', icon: <BarChart3 size={17} /> },
   ];
 
@@ -178,6 +181,32 @@ const AuthorityPortalPage: React.FC<AuthorityPortalPageProps> = ({
 
       {activeTab === 'analytics' ? (
         <AnalyticsCharts analytics={analytics} scope={analyticsScope} onScopeChange={onScopeChange} />
+      ) : activeTab === 'map' ? (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-navy-900">Jurisdiction Complaint Locations (OpenStreetMap)</h2>
+              <p className="text-xs text-slate-500">
+                Inspect pinned locations for complaints assigned to {myTier}. Click a marker to select it.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab('assigned')}
+              className="px-4 py-2 rounded-xl bg-navy-900 hover:bg-teal-600 text-white text-xs font-bold"
+            >
+              Open Assigned Queue
+            </button>
+          </div>
+          <LiveTrackingMap
+            mode="viewer"
+            grievances={tierComplaints}
+            selectedGrievanceId={selectedCase?.id}
+            focusLocation={selectedCase?.location}
+            onGrievanceClick={(g) => setSelectedId(g.id)}
+            className="h-[500px]"
+          />
+        </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <div className="lg:col-span-5 space-y-3">
@@ -255,13 +284,16 @@ const AuthorityPortalPage: React.FC<AuthorityPortalPageProps> = ({
                   />
                 )}
 
-                <div className="grid grid-cols-2 gap-3 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <span className="text-slate-400 block">Site Location</span>
+                    <span className="text-slate-400 block">Site Location & Coordinates</span>
                     <strong className="text-navy-900 flex items-center gap-1 mt-0.5">
-                      <MapPin size={13} className="text-teal-600" />
+                      <MapPin size={13} className="text-teal-600 shrink-0" />
                       {selectedCase.location.address || selectedCase.location.area}
                     </strong>
+                    <span className="font-mono text-[11px] text-teal-700 block mt-0.5">
+                      {selectedCase.location.latitude.toFixed(5)}, {selectedCase.location.longitude.toFixed(5)}
+                    </span>
                   </div>
                   <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
                     <span className="text-slate-400 block">SLA Status</span>
@@ -270,6 +302,14 @@ const AuthorityPortalPage: React.FC<AuthorityPortalPageProps> = ({
                     </strong>
                   </div>
                 </div>
+
+                <LiveTrackingMap
+                  mode="viewer"
+                  grievances={[selectedCase]}
+                  selectedGrievanceId={selectedCase.id}
+                  focusLocation={selectedCase.location}
+                  className="h-[220px]"
+                />
 
                 {/* Authority Actions */}
                 {selectedCase.status !== IssueStatus.RESOLVED && selectedCase.status !== IssueStatus.REJECTED ? (

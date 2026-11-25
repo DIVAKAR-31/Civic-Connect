@@ -13,6 +13,7 @@ import {
   Zap,
   History,
   Cpu,
+  Map as MapIcon,
 } from 'lucide-react';
 import {
   AdminAIAnalysis,
@@ -29,6 +30,7 @@ import { downloadService } from '../services/downloadService';
 import PortalLayout, { SidebarNavItem } from '../components/PortalLayout';
 import AnalyticsCharts from '../components/AnalyticsCharts';
 import ComplaintTimeline from '../components/ComplaintTimeline';
+import LiveTrackingMap from '../components/LiveTrackingMap';
 
 interface AdminPageProps {
   user: User;
@@ -60,7 +62,7 @@ const AdminPage: React.FC<AdminPageProps> = ({
   onRefresh,
   onLogout,
 }) => {
-  const [activeTab, setActiveTab] = useState<'analytics' | 'complaints' | 'unresolved'>('analytics');
+  const [activeTab, setActiveTab] = useState<'analytics' | 'complaints' | 'map' | 'unresolved'>('analytics');
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [priorityFilter, setPriorityFilter] = useState('all');
@@ -178,6 +180,7 @@ const AdminPage: React.FC<AdminPageProps> = ({
   const navItems: SidebarNavItem[] = [
     { id: 'analytics', label: 'Analytics & KPIs', icon: <LayoutDashboard size={17} /> },
     { id: 'complaints', label: 'All Complaints', icon: <ClipboardList size={17} />, badge: stats.total },
+    { id: 'map', label: 'Complaints Map', icon: <MapIcon size={17} />, badge: grievances.length },
     { id: 'unresolved', label: 'Unresolved & SLA', icon: <AlertTriangle size={17} />, badge: stats.overdue },
   ];
 
@@ -251,6 +254,34 @@ const AdminPage: React.FC<AdminPageProps> = ({
             </div>
           </div>
           <AnalyticsCharts analytics={analytics} scope={analyticsScope} onScopeChange={onScopeChange} />
+        </div>
+      )}
+
+      {activeTab === 'map' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-navy-900">Geospatial Complaint Map (OpenStreetMap)</h2>
+              <p className="text-xs text-slate-500">
+                Click any marker to inspect details or switch to All Complaints to update priority & routing.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab('complaints')}
+              className="px-4 py-2 rounded-xl bg-navy-900 hover:bg-teal-600 text-white text-xs font-bold"
+            >
+              Manage Selected Case
+            </button>
+          </div>
+          <LiveTrackingMap
+            mode="viewer"
+            grievances={grievances}
+            selectedGrievanceId={selectedCase?.id}
+            focusLocation={selectedCase?.location}
+            onGrievanceClick={(g) => setSelectedId(g.id)}
+            className="h-[520px]"
+          />
         </div>
       )}
 
@@ -410,11 +441,14 @@ const AdminPage: React.FC<AdminPageProps> = ({
                     <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-start gap-2">
                       <MapPin size={15} className="text-teal-600 shrink-0 mt-0.5" />
                       <div>
-                        <span className="text-slate-400 block">Location</span>
-                        <strong className="text-navy-900">
+                        <span className="text-slate-400 block">Location & Coordinates</span>
+                        <strong className="text-navy-900 block">
                           {selectedCase.location.address} ({selectedCase.location.village || selectedCase.location.area},{' '}
                           {selectedCase.location.district})
                         </strong>
+                        <span className="font-mono text-[11px] text-teal-700">
+                          {selectedCase.location.latitude.toFixed(5)}, {selectedCase.location.longitude.toFixed(5)}
+                        </span>
                       </div>
                     </div>
                     <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-start gap-2">
@@ -430,6 +464,14 @@ const AdminPage: React.FC<AdminPageProps> = ({
                       </div>
                     </div>
                   </div>
+
+                  <LiveTrackingMap
+                    mode="viewer"
+                    grievances={[selectedCase]}
+                    selectedGrievanceId={selectedCase.id}
+                    focusLocation={selectedCase.location}
+                    className="h-[220px]"
+                  />
 
                   {aiScan && (
                     <div className="p-4 rounded-2xl bg-navy-900 text-white text-xs space-y-2">

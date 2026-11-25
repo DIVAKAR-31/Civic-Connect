@@ -1,339 +1,487 @@
-
-import React, { useEffect, useRef, useCallback, useState } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Popup,
+  ZoomControl,
+  useMap,
+  useMapEvents,
+} from 'react-leaflet';
 import L from 'leaflet';
+import {
+  Navigation,
+  Loader2,
+  AlertCircle,
+  RefreshCw,
+  SignalHigh,
+  X,
+  MapPin,
+  WifiOff,
+} from 'lucide-react';
 import { Location, Grievance, IssueStatus } from '../types';
-import { Crosshair, Loader2, Navigation, AlertCircle, RefreshCw, SignalHigh, X, Info } from 'lucide-react';
 
 interface LiveTrackingMapProps {
   mode: 'picker' | 'viewer';
   initialLocation?: Location | null;
   onLocationSelect?: (loc: Location) => void;
   grievances?: Grievance[];
+  selectedGrievanceId?: string | null;
   onGrievanceClick?: (g: Grievance) => void;
+  focusLocation?: Location | null;
   className?: string;
 }
 
-const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({ 
-  mode, 
-  initialLocation, 
-  onLocationSelect, 
-  grievances, 
-  onGrievanceClick, 
-  className = "h-[400px]"
-}) => {
-  const mapContainerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const markerRef = useRef<L.Marker | null>(null);
-  const userLocationMarkerRef = useRef<L.Marker | null>(null);
-  const markersGroupRef = useRef<L.LayerGroup | null>(null);
+const DEFAULT_CENTER: [number, number] = [13.0827, 80.2707]; // Chennai default
 
-  const [address, setAddress] = useState<string>('');
-  const [loading, setLoading] = useState(false);
+function isValidCoords(lat?: number, lng?: number): boolean {
+  return (
+    typeof lat === 'number' &&
+    typeof lng === 'number' &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lng >= -180 &&
+    lng <= 180
+  );
+}
+
+function createPinIcon(colorHex: string, active = false): L.DivIcon {
+  const size = active ? 36 : 30;
+  return L.divIcon({
+    className: 'civic-osm-marker',
+    html: `<div style="display:flex;align-items:center;justify-content:center;width:${size}px;height:${size}px;border-radius:9999px;background:${colorHex};border:3px solid #ffffff;box-shadow:0 6px 16px rgba(15,23,42,0.35);color:#ffffff;">
+      <svg xmlns="http://www.w3.org/2000/svg" width="${active ? 18 : 15}" height="${active ? 18 : 15}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/>
+        <circle cx="12" cy="10" r="3"/>
+      </svg>
+    </div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size],
+    popupAnchor: [0, -size + 4],
+  });
+}
+
+function createUserPulseIcon(): L.DivIcon {
+  return L.divIcon({
+    className: 'civic-user-pulse',
+    html: `<div style="position:relative;width:22px;height:22px;display:flex;align-items:center;justify-content:center;">
+      <div style="position:absolute;inset:0;border-radius:9999px;background:#0D9488;opacity:0.25;"></div>
+      <div style="width:12px;height:12px;border-radius:9999px;background:#0D9488;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3);"></div>
+    </div>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+  });
+}
+
+const MapController: React.FC<{
+  center: [number, number];
+  zoom?: number;
+  shouldFly?: boolean;
+}> = ({ center, zoom, shouldFly }) => {
+  const map = useMap();
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      map.invalidateSize();
+    }, 200);
+    return () => clearTimeout(t);
+  }, [map]);
+
+  useEffect(() => {
+    if (shouldFly && isValidCoords(center[0], center[1])) {
+      map.flyTo(center, zoom || map.getZoom(), { duration: 1.0 });
+    }
+  }, [center[0], center[1], zoom, shouldFly, map]);
+
+  return null;
+};
+
+const PickerEvents: React.FC<{
+  onPick: (lat: number, lng: number) => void;
+}> = ({ onPick }) => {
+  useMapEvents({
+    click(e) {
+      onPick(e.latlng.lat, e.latlng.lng);
+    },
+  });
+  return null;
+};
+
+const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
+  mode,
+  initialLocation,
+  onLocationSelect,
+  grievances = [],
+  selectedGrievanceId,
+  onGrievanceClick,
+  focusLocation,
+  className = 'h-[380px]',
+}) => {
+  const initialCoords: [number, number] = useMemo(() => {
+    if (initialLocation && isValidCoords(initialLocation.latitude, initialLocation.longitude)) {
+      return [initialLocation.latitude, initialLocation.longitude];
+    }
+    if (focusLocation && isValidCoords(focusLocation.latitude, focusLocation.longitude)) {
+      return [focusLocation.latitude, focusLocation.longitude];
+    }
+    const firstValid = grievances.find((g) => isValidCoords(g.location?.latitude, g.location?.longitude));
+    if (mode === 'viewer' && firstValid) {
+      return [firstValid.location.latitude, firstValid.location.longitude];
+    }
+    return DEFAULT_CENTER;
+  }, []);
+
+  const [pickedPos, setPickedPos] = useState<[number, number]>(
+    initialLocation && isValidCoords(initialLocation.latitude, initialLocation.longitude)
+      ? [initialLocation.latitude, initialLocation.longitude]
+      : DEFAULT_CENTER
+  );
+  const [flyTarget, setFlyTarget] = useState<{ coords: [number, number]; zoom: number } | null>(null);
+  const [userGpsPos, setUserGpsPos] = useState<[number, number] | null>(null);
+
+  const [address, setAddress] = useState<string>(initialLocation?.address || '');
+  const [geocoding, setGeocoding] = useState(false);
   const [gpsSyncing, setGpsSyncing] = useState(false);
   const [gpsError, setGpsError] = useState<'PERMISSION_DENIED' | 'TIMEOUT' | 'POSITION_UNAVAILABLE' | null>(null);
 
-  // Helper to resolve human-readable address from coordinates
-  const reverseGeocode = useCallback(async (lat: number, lng: number) => {
-    setLoading(true);
-    try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`, {
-        headers: { 'Accept-Language': 'en' }
-      });
-      const data = await res.json();
-      
-      const displayAddr = data.display_name || 'Specific address not found';
-      const area = data.address?.suburb || data.address?.neighbourhood || data.address?.city || 'Municipal Grid';
-      
-      setAddress(displayAddr);
-      onLocationSelect?.({
-        latitude: lat,
-        longitude: lng,
-        address: displayAddr,
-        area: area
-      });
-    } catch (err) {
-      console.error('Reverse geocoding failed', err);
-      setAddress(`Lat: ${lat.toFixed(5)}, Lng: ${lng.toFixed(5)}`);
-      onLocationSelect?.({
-        latitude: lat,
-        longitude: lng,
-        address: 'Coordinate Lock',
-        area: 'Manual Sector'
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [onLocationSelect]);
+  const [tileErrorCount, setTileErrorCount] = useState(0);
+  const [tileKey, setTileKey] = useState(0);
+  const pickerMarkerRef = useRef<L.Marker | null>(null);
 
-  // Unified function to update marker and map view
-  const updatePickerMarker = useCallback((lat: number, lng: number, moveMap: boolean = false) => {
-    if (!mapRef.current) return;
-
-    const coords: L.LatLngExpression = [lat, lng];
-
-    if (markerRef.current) {
-      markerRef.current.setLatLng(coords);
-    } else {
-      const icon = L.divIcon({
-        className: 'picker-icon',
-        html: `<div class="bg-blue-600 p-2 rounded-full border-2 border-white shadow-xl text-white flex items-center justify-center">
-                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-                   <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/>
-                   <circle cx="12" cy="10" r="3"/>
-                 </svg>
-               </div>`,
-        iconSize: [36, 36],
-        iconAnchor: [18, 36]
-      });
-
-      markerRef.current = L.marker(coords, { draggable: true, icon })
-        .addTo(mapRef.current)
-        .on('dragend', (e: L.LeafletEvent) => {
-          const target = e.target as L.Marker;
-          const { lat, lng } = target.getLatLng();
-          reverseGeocode(lat, lng);
-        });
-    }
-
-    if (moveMap) {
-      mapRef.current.flyTo(coords, 17, {
-        duration: 1.8,
-        easeLinearity: 0.15
-      });
-    }
-
-    reverseGeocode(lat, lng);
-  }, [reverseGeocode]);
-
-  // High-Speed GPS Syncing (5s Timeout)
-  const locateMe = useCallback((isManual: boolean = false) => {
-    if (!navigator.geolocation) {
-      if (isManual) alert("Geolocation not supported on this device.");
-      return;
-    }
-
-    // MANDATORY: Clear UI state before starting fresh request
-    setGpsError(null);
-    setGpsSyncing(true);
-    
-    const options: PositionOptions = {
-      enableHighAccuracy: true,
-      timeout: 5000, // FAST SYNC: 5 Seconds limit
-      maximumAge: 0 // Do not use old cached positions
-    };
-
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const { latitude, longitude } = pos.coords;
-        setGpsError(null);
-        
-        if (mode === 'picker') {
-          updatePickerMarker(latitude, longitude, true);
-        } else {
-          mapRef.current?.flyTo([latitude, longitude], 15, { duration: 1.5 });
-        }
-
-        if (mapRef.current) {
-          if (userLocationMarkerRef.current) {
-            userLocationMarkerRef.current.setLatLng([latitude, longitude]);
-          } else {
-            const userIcon = L.divIcon({
-              className: 'user-location-pulsator',
-              html: `<div class="relative flex items-center justify-center w-6 h-6">
-                       <div class="absolute w-full h-full bg-blue-500 rounded-full animate-ping opacity-20"></div>
-                       <div class="relative w-3 h-3 bg-blue-600 rounded-full border-2 border-white shadow-md"></div>
-                     </div>`,
-              iconSize: [24, 24],
-              iconAnchor: [12, 12]
-            });
-            userLocationMarkerRef.current = L.marker([latitude, longitude], { icon: userIcon, zIndexOffset: 1000 }).addTo(mapRef.current);
-          }
-        }
-        setGpsSyncing(false);
-      },
-      (err) => {
-        // Silently fail on background attempts to avoid false 'Blocked' UI
-        if (!isManual && err.code === 1) {
-          setGpsSyncing(false);
-          return;
-        }
-
-        if (err.code === 1) {
-          setGpsError("PERMISSION_DENIED");
-        } else if (err.code === 2) {
-          setGpsError("POSITION_UNAVAILABLE");
-        } else if (err.code === 3) {
-          setGpsError("TIMEOUT");
-        }
-        
-        console.warn(`GPS Signal Issue (${err.code}): ${err.message}`);
-        setGpsSyncing(false);
-      },
-      options
-    );
-  }, [mode, updatePickerMarker]);
-
-  // Initial Map Mount
+  // Sync focusLocation changes in viewer mode
   useEffect(() => {
-    if (!mapContainerRef.current || mapRef.current) return;
-
-    const defaultCenter: L.LatLngExpression = initialLocation 
-      ? [initialLocation.latitude, initialLocation.longitude] 
-      : [9.9252, 78.1198]; // Set default to Madurai
-
-    const map = L.map(mapContainerRef.current, {
-      zoomControl: false,
-      attributionControl: false
-    }).setView(defaultCenter, mode === 'picker' ? 15 : 12);
-
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-      maxZoom: 19,
-    }).addTo(map);
-
-    L.control.zoom({ position: 'bottomright' }).addTo(map);
-
-    mapRef.current = map;
-    markersGroupRef.current = L.layerGroup().addTo(map);
-
-    if (mode === 'picker') {
-      map.on('click', (e: L.LeafletMouseEvent) => {
-        const { lat, lng } = e.latlng;
-        updatePickerMarker(lat, lng);
-      });
-      
-      if (initialLocation) {
-        updatePickerMarker(initialLocation.latitude, initialLocation.longitude);
-      } else {
-        locateMe(false); // Fast background check
-      }
+    if (mode === 'viewer' && focusLocation && isValidCoords(focusLocation.latitude, focusLocation.longitude)) {
+      setFlyTarget({ coords: [focusLocation.latitude, focusLocation.longitude], zoom: 15 });
     }
+  }, [mode, focusLocation?.latitude, focusLocation?.longitude]);
 
-    const timer = setTimeout(() => {
-      map.invalidateSize();
-    }, 300);
+  // Reverse geocode via free OpenStreetMap Nominatim API
+  const reverseGeocode = useCallback(
+    async (lat: number, lng: number) => {
+      setGeocoding(true);
+      try {
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`,
+          { headers: { 'Accept-Language': 'en' } }
+        );
+        if (!res.ok) throw new Error(`Nominatim HTTP ${res.status}`);
+        const data = await res.json();
+        const displayAddr = data.display_name || `Lat ${lat.toFixed(5)}, Lng ${lng.toFixed(5)}`;
+        const addrObj = data.address || {};
+        const area =
+          addrObj.suburb ||
+          addrObj.neighbourhood ||
+          addrObj.village ||
+          addrObj.town ||
+          addrObj.city_district ||
+          addrObj.city ||
+          'Municipal Ward';
+        const district = addrObj.state_district || addrObj.county || addrObj.city || '';
+        const village = addrObj.village || addrObj.suburb || addrObj.neighbourhood || '';
+        const taluk = addrObj.county || addrObj.town || '';
 
-    return () => {
-      clearTimeout(timer);
-      if (mapRef.current) {
-        mapRef.current.remove();
-        mapRef.current = null;
+        setAddress(displayAddr);
+        onLocationSelect?.({
+          latitude: Number(lat.toFixed(6)),
+          longitude: Number(lng.toFixed(6)),
+          address: displayAddr,
+          area,
+          village,
+          taluk,
+          district,
+        });
+      } catch {
+        const fallbackAddr = `Lat: ${lat.toFixed(5)}, Lng: ${lng.toFixed(5)}`;
+        setAddress(fallbackAddr);
+        onLocationSelect?.({
+          latitude: Number(lat.toFixed(6)),
+          longitude: Number(lng.toFixed(6)),
+          address: fallbackAddr,
+          area: 'Selected Map Coordinates',
+        });
+      } finally {
+        setGeocoding(false);
       }
-      markerRef.current = null;
-      userLocationMarkerRef.current = null;
-    };
+    },
+    [onLocationSelect]
+  );
+
+  const handlePickCoordinates = useCallback(
+    (lat: number, lng: number, shouldFly = false) => {
+      setPickedPos([lat, lng]);
+      if (shouldFly) {
+        setFlyTarget({ coords: [lat, lng], zoom: 16 });
+      }
+      reverseGeocode(lat, lng);
+    },
+    [reverseGeocode]
+  );
+
+  // Initialize picker location once on mount if none provided
+  useEffect(() => {
+    if (mode === 'picker' && !initialLocation) {
+      onLocationSelect?.({
+        latitude: DEFAULT_CENTER[0],
+        longitude: DEFAULT_CENTER[1],
+        address: 'Click map or drag marker to refine exact location',
+        area: 'Chennai',
+        district: 'Chennai',
+      });
+    }
   }, []);
 
-  // Sync Markers for Viewer/Admin modes
-  useEffect(() => {
-    if (mode === 'viewer' && markersGroupRef.current && grievances) {
-      markersGroupRef.current.clearLayers();
-      grievances.forEach(g => {
-        const color = g.status === IssueStatus.RESOLVED ? '#10b981' : '#2563eb';
-        const icon = L.divIcon({
-          className: 'custom-div-icon',
-          html: `<div style="background-color: ${color}; width: 12px; height: 12px; border: 2px solid white; border-radius: 50%; box-shadow: 0 0 10px rgba(0,0,0,0.2);"></div>`,
-          iconSize: [12, 12],
-          iconAnchor: [6, 6]
-        });
+  const locateMe = useCallback(
+    (isManual = true) => {
+      if (!navigator.geolocation) {
+        if (isManual) setGpsError('POSITION_UNAVAILABLE');
+        return;
+      }
+      setGpsError(null);
+      setGpsSyncing(true);
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const { latitude, longitude } = pos.coords;
+          setUserGpsPos([latitude, longitude]);
+          setGpsSyncing(false);
+          if (mode === 'picker') {
+            handlePickCoordinates(latitude, longitude, true);
+          } else {
+            setFlyTarget({ coords: [latitude, longitude], zoom: 15 });
+          }
+        },
+        (err) => {
+          setGpsSyncing(false);
+          if (!isManual && err.code === 1) return;
+          if (err.code === 1) setGpsError('PERMISSION_DENIED');
+          else if (err.code === 3) setGpsError('TIMEOUT');
+          else setGpsError('POSITION_UNAVAILABLE');
+        },
+        { enableHighAccuracy: true, timeout: 6000, maximumAge: 0 }
+      );
+    },
+    [mode, handlePickCoordinates]
+  );
 
-        L.marker([g.location.latitude, g.location.longitude], { icon })
-          .on('click', () => onGrievanceClick?.(g))
-          .addTo(markersGroupRef.current!);
-      });
-    }
-  }, [grievances, mode, onGrievanceClick]);
+  const pickerIcon = useMemo(() => createPinIcon('#0D9488', true), []);
+  const userIcon = useMemo(() => createUserPulseIcon(), []);
+
+  const validGrievances = useMemo(
+    () => grievances.filter((g) => isValidCoords(g.location?.latitude, g.location?.longitude)),
+    [grievances]
+  );
+
+  const hasTileIssue = tileErrorCount >= 4;
 
   return (
-    <div className={`relative overflow-hidden rounded-[2.5rem] border border-slate-100 shadow-inner group ${className}`}>
-      <div ref={mapContainerRef} className="w-full h-full z-10" />
-      
-      {/* Control Overlay */}
-      <div className="absolute top-6 left-6 z-20 flex flex-col gap-3 max-w-[85%]">
-        <button 
-          type="button"
-          onClick={() => locateMe(true)}
-          disabled={gpsSyncing}
-          className={`px-5 py-3 rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-2xl flex items-center gap-2 transition-all active:scale-95 border border-white/20 ${
-            gpsSyncing 
-            ? 'bg-blue-600 text-white cursor-wait animate-pulse' 
-            : gpsError === 'PERMISSION_DENIED'
-            ? 'bg-red-50 text-red-600 border-red-100 hover:bg-red-100'
-            : gpsError 
-            ? 'bg-orange-50 text-orange-600 border-orange-100 hover:bg-orange-100'
-            : 'bg-white text-slate-900 hover:bg-blue-600 hover:text-white'
-          }`}
-        >
-          {gpsSyncing ? (
-            <>
-              <Loader2 size={14} className="animate-spin" />
-              Signal Search...
-            </>
-          ) : gpsError === 'PERMISSION_DENIED' ? (
-            <>
-              <RefreshCw size={14} />
-              GPS Blocked • Tap to Retry
-            </>
-          ) : gpsError ? (
-            <>
-              <SignalHigh size={14} />
-              Signal Weak • Try Again
-            </>
-          ) : (
-            <>
-              <Navigation size={14} className={mode === 'viewer' ? 'rotate-45' : ''} />
-              {mode === 'picker' ? 'Sync GPS Position' : 'Find My Location'}
-            </>
-          )}
-        </button>
-        
-        {/* Active Geocode Label */}
-        {mode === 'picker' && (address || loading) && !gpsError && (
-          <div className="bg-white/95 backdrop-blur-md p-4 rounded-2xl shadow-xl border border-white text-[10px] font-bold text-slate-600 animate-slideUp">
-            <span className="text-blue-600 font-black block mb-1 tracking-[0.1em]">DETECTED LOCATION</span>
-            {loading ? (
-              <div className="flex items-center gap-2 opacity-50">
-                <Loader2 size={10} className="animate-spin" />
-                Refining Grid...
-              </div>
+    <div
+      className={`relative w-full overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 shadow-inner ${className}`}
+    >
+      <MapContainer
+        center={flyTarget ? flyTarget.coords : initialCoords}
+        zoom={mode === 'picker' ? 14 : 11}
+        zoomControl={false}
+        scrollWheelZoom={true}
+        className="w-full h-full z-10"
+      >
+        <TileLayer
+          key={tileKey}
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          maxZoom={19}
+          eventHandlers={{
+            tileerror: () => setTileErrorCount((c) => c + 1),
+            load: () => setTileErrorCount(0),
+          }}
+        />
+        <ZoomControl position="bottomright" />
+        <MapController
+          center={flyTarget ? flyTarget.coords : initialCoords}
+          zoom={flyTarget?.zoom}
+          shouldFly={Boolean(flyTarget)}
+        />
+
+        {mode === 'picker' && (
+          <>
+            <PickerEvents onPick={(lat, lng) => handlePickCoordinates(lat, lng, false)} />
+            <Marker
+              ref={pickerMarkerRef}
+              position={pickedPos}
+              draggable={true}
+              icon={pickerIcon}
+              eventHandlers={{
+                dragend: () => {
+                  const marker = pickerMarkerRef.current;
+                  if (marker) {
+                    const { lat, lng } = marker.getLatLng();
+                    handlePickCoordinates(lat, lng, false);
+                  }
+                },
+              }}
+            >
+              <Popup>
+                <div className="text-xs">
+                  <p className="font-bold text-slate-900">Selected Complaint Location</p>
+                  <p className="text-slate-600 mt-0.5">
+                    {pickedPos[0].toFixed(5)}, {pickedPos[1].toFixed(5)}
+                  </p>
+                  <p className="text-[11px] text-teal-700 mt-1">Drag marker or click map to adjust</p>
+                </div>
+              </Popup>
+            </Marker>
+          </>
+        )}
+
+        {mode === 'viewer' &&
+          validGrievances.map((g) => {
+            const isSelected = selectedGrievanceId === g.id;
+            const color =
+              g.status === IssueStatus.RESOLVED
+                ? '#059669'
+                : g.priority === 'Critical'
+                ? '#DC2626'
+                : g.status === IssueStatus.ESCALATED
+                ? '#D97706'
+                : '#0B1F3A';
+            return (
+              <Marker
+                key={g.id}
+                position={[g.location.latitude, g.location.longitude]}
+                icon={createPinIcon(color, isSelected)}
+                eventHandlers={{
+                  click: () => onGrievanceClick?.(g),
+                }}
+              >
+                <Popup>
+                  <div className="text-xs space-y-1 max-w-[220px]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono font-bold text-teal-700">{g.id}</span>
+                      <span className="font-semibold text-slate-500">{g.status}</span>
+                    </div>
+                    <p className="font-bold text-slate-900">{g.title}</p>
+                    <p className="text-[11px] text-slate-600">
+                      {g.category} • Priority: {g.priority}
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      {g.location.address || g.location.area || g.location.district}
+                    </p>
+                  </div>
+                </Popup>
+              </Marker>
+            );
+          })}
+
+        {userGpsPos && (
+          <Marker position={userGpsPos} icon={userIcon}>
+            <Popup>
+              <span className="text-xs font-semibold">Your Current GPS Position</span>
+            </Popup>
+          </Marker>
+        )}
+      </MapContainer>
+
+      {/* Top-Left Controls Overlay */}
+      <div className="absolute top-3 left-3 z-20 flex flex-col gap-2 max-w-[85%] sm:max-w-xs pointer-events-none">
+        <div className="flex flex-wrap gap-2 pointer-events-auto">
+          <button
+            type="button"
+            onClick={() => locateMe(true)}
+            disabled={gpsSyncing}
+            className={`px-3.5 py-2 rounded-xl font-bold text-xs shadow-md flex items-center gap-1.5 transition-all border ${
+              gpsSyncing
+                ? 'bg-teal-600 text-white border-teal-500 cursor-wait'
+                : gpsError
+                ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+                : 'bg-white text-navy-900 border-slate-200 hover:bg-navy-900 hover:text-white'
+            }`}
+          >
+            {gpsSyncing ? (
+              <>
+                <Loader2 size={14} className="animate-spin" /> Detecting GPS...
+              </>
+            ) : gpsError ? (
+              <>
+                <RefreshCw size={14} /> Retry GPS
+              </>
             ) : (
-              <div className="line-clamp-2 leading-relaxed">{address}</div>
+              <>
+                <Navigation size={14} /> {mode === 'picker' ? 'Use My Location' : 'Center on Me'}
+              </>
+            )}
+          </button>
+
+          {mode === 'picker' && (
+            <span className="px-3 py-2 rounded-xl bg-navy-900/90 text-white text-[11px] font-mono shadow-md flex items-center gap-1.5">
+              <MapPin size={12} className="text-teal-400" />
+              {pickedPos[0].toFixed(4)}, {pickedPos[1].toFixed(4)}
+            </span>
+          )}
+        </div>
+
+        {mode === 'picker' && (address || geocoding) && (
+          <div className="pointer-events-auto bg-white/95 backdrop-blur-sm px-3.5 py-2.5 rounded-xl shadow-md border border-slate-200 text-xs text-slate-700">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-teal-700 block">
+              Click map or drag pin to move
+            </span>
+            {geocoding ? (
+              <span className="text-[11px] text-slate-500 flex items-center gap-1.5 mt-0.5">
+                <Loader2 size={11} className="animate-spin" /> Looking up street address...
+              </span>
+            ) : (
+              <p className="text-[11px] font-medium line-clamp-2 mt-0.5">{address}</p>
             )}
           </div>
         )}
 
-        {/* Detailed Error & Instruction Panel */}
         {gpsError && (
-          <div className={`bg-white/95 backdrop-blur-md p-5 rounded-[2rem] border-2 shadow-2xl animate-fadeIn flex items-start gap-4 ${
-            gpsError === 'PERMISSION_DENIED' ? 'border-red-100' : 'border-orange-100'
-          }`}>
-            <div className={`p-2 rounded-xl shrink-0 ${gpsError === 'PERMISSION_DENIED' ? 'bg-red-50 text-red-500' : 'bg-orange-50 text-orange-500'}`}>
-               {gpsError === 'PERMISSION_DENIED' ? <AlertCircle size={20} /> : <SignalHigh size={20} />}
-            </div>
-            <div className="flex-grow">
-              <p className={`text-[11px] font-black uppercase tracking-widest mb-1 ${
-                gpsError === 'PERMISSION_DENIED' ? 'text-red-600' : 'text-orange-600'
-              }`}>
-                {gpsError === 'PERMISSION_DENIED' ? 'Location Access Blocked' : 
-                 gpsError === 'TIMEOUT' ? 'GPS Signal Timeout' : 'Position Unavailable'}
+          <div className="pointer-events-auto bg-white/95 backdrop-blur-sm p-3 rounded-xl border border-amber-200 shadow-md flex items-start gap-2.5 text-xs">
+            {gpsError === 'PERMISSION_DENIED' ? (
+              <AlertCircle size={16} className="text-red-500 shrink-0 mt-0.5" />
+            ) : (
+              <SignalHigh size={16} className="text-amber-500 shrink-0 mt-0.5" />
+            )}
+            <div className="flex-1 text-[11px] text-slate-600">
+              <p className="font-bold text-slate-800">
+                {gpsError === 'PERMISSION_DENIED'
+                  ? 'Location permission blocked'
+                  : gpsError === 'TIMEOUT'
+                  ? 'GPS timed out'
+                  : 'GPS unavailable'}
               </p>
-              <p className="text-[10px] font-bold text-slate-500 leading-relaxed pr-2">
-                {gpsError === 'PERMISSION_DENIED' && "Browser access is denied. Click the lock icon 🔒 in your address bar, enable 'Location', then refresh."}
-                {gpsError === 'TIMEOUT' && "Unable to get a lock within 5 seconds. Ensure you are outdoors or near a window for a clearer signal."}
-                {gpsError === 'POSITION_UNAVAILABLE' && "Device GPS failed to resolve. Check if 'Location Services' are enabled in your device settings."}
-              </p>
+              <p>Click directly on the OpenStreetMap or drag the marker to pick your location.</p>
             </div>
-            <button 
-              onClick={() => setGpsError(null)} 
-              className="text-slate-300 hover:text-slate-600 transition-colors shrink-0 pt-1"
+            <button
+              type="button"
+              onClick={() => setGpsError(null)}
+              className="text-slate-400 hover:text-slate-700"
+              aria-label="Dismiss GPS message"
             >
-              <X size={16} />
+              <X size={14} />
             </button>
           </div>
         )}
-      </div>
 
-      {/* Decorative inner border */}
-      <div className="absolute inset-0 pointer-events-none border-[12px] border-white/40 rounded-[2.5rem] z-20"></div>
+        {hasTileIssue && (
+          <div className="pointer-events-auto bg-amber-50/95 border border-amber-300 rounded-xl p-3 shadow-md text-[11px] text-amber-900 flex items-start gap-2">
+            <WifiOff size={15} className="shrink-0 mt-0.5 text-amber-700" />
+            <div className="flex-1">
+              <p className="font-bold">OpenStreetMap tiles failed to load</p>
+              <p>Check your connection or retry. Coordinates and manual address entry still work.</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setTileErrorCount(0);
+                  setTileKey((k) => k + 1);
+                }}
+                className="mt-1.5 px-2.5 py-1 rounded-lg bg-amber-700 text-white font-bold text-[10px]"
+              >
+                Retry Map Tiles
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 };

@@ -502,15 +502,24 @@ const ReportPage: React.FC<ReportPageProps> = ({ onAdded, embedded = false, onDo
                 initialLocation={mapLocation}
                 onLocationSelect={(loc) => {
                   setMapLocation(loc);
-                  if (loc.address && !manualAddress) setManualAddress(loc.address);
-                  if (loc.area && !manualArea) setManualArea(loc.area);
+                  if (loc.address && !loc.address.startsWith('Click map')) setManualAddress(loc.address);
+                  if (loc.area) setManualArea(loc.area);
+                  if (loc.village) setManualVillage(loc.village);
+                  if (loc.taluk) setManualTaluk(loc.taluk);
+                  if (loc.district) setManualDistrict(loc.district);
                 }}
-                className="h-[340px]"
+                className="h-[360px]"
               />
               {mapLocation && (
-                <p className="text-xs text-teal-700 font-semibold flex items-center gap-1.5">
-                  <MapPin size={14} /> Selected: {mapLocation.address || `${mapLocation.latitude.toFixed(4)}, ${mapLocation.longitude.toFixed(4)}`}
-                </p>
+                <div className="flex flex-wrap items-center justify-between gap-2 bg-teal-50 border border-teal-200 rounded-xl px-4 py-2.5 text-xs">
+                  <span className="text-teal-900 font-semibold flex items-center gap-1.5">
+                    <MapPin size={14} className="text-teal-600 shrink-0" />
+                    {mapLocation.address || 'Selected Map Location'}
+                  </span>
+                  <span className="font-mono font-bold text-navy-900 bg-white px-2.5 py-1 rounded-lg border border-teal-200">
+                    Lat: {mapLocation.latitude.toFixed(5)} | Lng: {mapLocation.longitude.toFixed(5)}
+                  </span>
+                </div>
               )}
             </div>
           )}
